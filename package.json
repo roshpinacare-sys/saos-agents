@@ -26,5 +26,14 @@
   ],
   "engines": {
     "node": ">=18"
-  }
+  },
+  "files": [
+    "src",
+    "cli",
+    "test",
+    "tools",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
 }

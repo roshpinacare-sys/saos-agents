@@ -3,11 +3,11 @@
  * טלמטריה-חיה-על-ה-ledger שלנו). הערוץ-המכונתי-הראשון-של-הקונסול: מפרק את
  * worklog.md לבלוקים, מודד-סוכנים/משימות, ותופס-כנה-הפרות-append-only.
  *
- * RUN:
- *   bun scripts/worklog-analytics.mjs                       # סיכום-אנושי על worklog.md
- *   bun scripts/worklog-analytics.mjs --json                # JSON לקונסול/מכונה
- *   bun scripts/worklog-analytics.mjs --file other.md --min-lines 100
- *   bun scripts/worklog-analytics.mjs --selftest            # וקטורים-פנימיים
+ * RUN (bun or node ≥ 18):
+ *   bun cli/worklog-analytics.mjs                       # סיכום-אנושי על worklog.md
+ *   bun cli/worklog-analytics.mjs --json                # JSON לקונסול/מכונה
+ *   bun cli/worklog-analytics.mjs --file other.md --min-lines 100
+ *   bun cli/worklog-analytics.mjs --selftest            # וקטורים-פנימיים
  *
  * אין-כתיבה-לשום-קובץ-כברירת-מחדל — קריאה-בלבד, כנות-מלאה.
  */

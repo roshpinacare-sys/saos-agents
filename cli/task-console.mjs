@@ -8,14 +8,14 @@
  *  · persist אטומי (temp+rename) לתוך state/ — מסילת-ה-custodian משמרת-אותם-בגיט
  *  · --json = הערוץ-המכונתי-לקונסול-החי
  *
- * RUN:
- *   bun scripts/task-console.mjs tasks|progress|decisions [--json]
- *   bun scripts/task-console.mjs task-add "<title>" [--priority N] [--deps a,b] [--assignee X]
- *   bun scripts/task-console.mjs task-set <id> <status> [--commit SHA] [--reason "..."]
- *   bun scripts/task-console.mjs decision-add <kind> "<question>" "<opt1>" "<opt2>"...
- *   bun scripts/task-console.mjs decision-answer <id> <1|text> [--by name] [--text "..."]
- *   bun scripts/task-console.mjs decision-settle <id> | decision-reopen <id> "<reason>" | decision-cancel <id> "<reason>"
- *   bun scripts/task-console.mjs drill [--seed N] [--json]
+ * RUN (bun or node ≥ 18):
+ *   bun cli/task-console.mjs tasks|progress|decisions [--json]
+ *   bun cli/task-console.mjs task-add "<title>" [--priority N] [--deps a,b] [--assignee X]
+ *   bun cli/task-console.mjs task-set <id> <status> [--commit SHA] [--reason "..."]
+ *   bun cli/task-console.mjs decision-add <kind> "<question>" "<opt1>" "<opt2>"...
+ *   bun cli/task-console.mjs decision-answer <id> <1|text> [--by name] [--text "..."]
+ *   bun cli/task-console.mjs decision-settle <id> | decision-reopen <id> "<reason>" | decision-cancel <id> "<reason>"
+ *   bun cli/task-console.mjs drill [--seed N] [--json]
  */
 import {
   createTask, setStatus, ready, progress, validateGraph, deserialize, serialize,
@@ -25,7 +25,7 @@ import {
   createDecision, answerDecision, settleDecision, reopenDecision, cancelDecision,
   listOpen, deserializeDQ, serializeDQ,
 } from "../src/decisionqueue.mjs";
-import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -47,6 +47,7 @@ const flagVal = (f) => {
 const FRESH_MS = 24 * 60 * 60 * 1000;
 
 function atomicWrite(file, content) {
+  mkdirSync(path.dirname(file), { recursive: true }); // fresh clone: state/ does not exist yet
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, content);
   renameSync(tmp, file);
@@ -121,7 +122,7 @@ try {
   switch (cmd) {
     case "tasks":
     case "progress": {
-      const g = deserialize(existsSync(TASKS_FILE) ? readFileSync(TASKS_FILE, "utf8") : JSON.stringify({ tasks: [] }));
+      const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
       const p = progress(g);
       if (has("--json")) {
         console.log(JSON.stringify({ at: new Date().toISOString(), progress: p, tasks: g.tasks, ready: ready(g).map((t) => t.id) }, null, 2));
@@ -136,7 +137,7 @@ try {
     case "task-add": {
       const title = args[1];
       if (!title) throw new Error("שימוש: task-add \"<title>\" [--priority N] [--deps a,b]");
-      const g = existsSync(TASKS_FILE) ? deserialize(readFileSync(TASKS_FILE, "utf8")) : { tasks: [] };
+      const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
       const t = createTask({
         id: flagVal("--id") ?? `T-${Date.now().toString(36).toUpperCase()}`,
         title,
@@ -153,7 +154,7 @@ try {
       const [, id, to] = args;
       if (!id || !to) throw new Error("שימוש: task-set <id> <status>");
       if (!STATUSES.includes(to)) throw new Error(`סטטוס-לא-מוכר: ${to} (חוקי: ${STATUSES.join(",")})`);
-      const g = deserialize(readFileSync(TASKS_FILE, "utf8"));
+      const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
       let evidence;
       let commit;
       if (to === "done") {
@@ -184,7 +185,7 @@ try {
       break;
     }
     case "decisions": {
-      const dq = deserializeDQ(readFileSync(DQ_FILE, "utf8"));
+      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
       const open = listOpen(dq);
       if (has("--json")) {
         console.log(JSON.stringify({ at: new Date().toISOString(), openCount: open.length, decisions: dq.decisions }, null, 2));
@@ -210,28 +211,28 @@ try {
     }
     case "decision-answer": {
       const [, id, input] = args;
-      const dq = deserializeDQ(readFileSync(DQ_FILE, "utf8"));
+      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
       const d = answerDecision(dq, id, { by: flagVal("--by") ?? "operator", optionText: input, text: flagVal("--text") });
       atomicWrite(DQ_FILE, serializeDQ(dq));
       console.log(`answered: ${d.id} → ${d.answer.option ?? "(טקסט-חופשי)"}${d.answer.text ? ` · "${d.answer.text}"` : ""} — settle-רק-אחרי-האפקט-בפועל`);
       break;
     }
     case "decision-settle": {
-      const dq = deserializeDQ(readFileSync(DQ_FILE, "utf8"));
+      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
       const d = settleDecision(dq, args[1]);
       atomicWrite(DQ_FILE, serializeDQ(dq));
       console.log(`settled: ${d.id}`);
       break;
     }
     case "decision-reopen": {
-      const dq = deserializeDQ(readFileSync(DQ_FILE, "utf8"));
+      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
       const d = reopenDecision(dq, args[1], positional(args.slice(2)).join(" "));
       atomicWrite(DQ_FILE, serializeDQ(dq));
       console.log(`reopened: ${d.id} — חוזר-ל-open עם-הסיבה-בהיסטוריה`);
       break;
     }
     case "decision-cancel": {
-      const dq = deserializeDQ(readFileSync(DQ_FILE, "utf8"));
+      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
       const d = cancelDecision(dq, args[1], positional(args.slice(2)).join(" "));
       atomicWrite(DQ_FILE, serializeDQ(dq));
       console.log(`cancelled: ${d.id}`);

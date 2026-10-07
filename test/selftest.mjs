@@ -78,7 +78,7 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
       return "";
     }
   })();
-  ok("worklog-intel: CLI module exists (scripts/worklog-analytics.mjs)", cliSrc.includes("--selftest") && cliSrc.includes("detectAnomalies"));
+  ok("worklog-intel: CLI module exists (cli/worklog-analytics.mjs)", cliSrc.includes("--selftest") && cliSrc.includes("detectAnomalies"));
 }
 /* R253 · TASKGRAPH + DECISIONQUEUE: גל-2 של זיקוק-agentcraft — תיאום-סוכנים-מבני.
  * done-only-via-verified-push = התרופה-המבנית ל-custodian-sweeps (95e90d2); DecisionQueue =
@@ -192,7 +192,8 @@ console.log(`\nSELFTEST ${pass}/${pass + fail} ${fail === 0 ? "PASS" : "FAIL"}`)
 try {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const HERE = path.dirname(new URL(import.meta.url).pathname);
+  const { fileURLToPath } = await import("node:url");
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
   const STATE = path.join(HERE, "..", "state");
   fs.mkdirSync(STATE, { recursive: true });
   fs.writeFileSync(path.join(STATE, "selftest-last-run.json"), JSON.stringify({ pass, fail, at: new Date().toISOString(), vectors: pass + fail }, null, 2));

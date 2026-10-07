@@ -4,7 +4,7 @@
 > an operator decision queue that cannot die silently, and append-only worklog
 > telemetry that treats shrinkage as an alarm.
 
-**Status:** battle-tested daily inside a live multi-agent fleet · **License:** MIT · **Runtime:** Bun (Node ≥ 18 works for the pure modules) · **Dependencies:** zero
+**Status:** battle-tested daily inside a live multi-agent fleet · **License:** MIT · **Runtime:** Bun or Node ≥ 18 · **Dependencies:** zero
 
 ---
 
@@ -29,7 +29,9 @@ bun test/selftest.mjs                  # module vectors (expect SELFTEST n/n PAS
 bun cli/worklog-analytics.mjs --selftest
 bun cli/task-console.mjs drill --seed 252   # full lifecycle, deterministic
 
-# your own ledger
+# every command above also runs on plain node ≥ 18 — zero transpile, zero deps
+
+# your own ledger (creates state/ on first write; corrupt files quarantine themselves)
 bun cli/task-console.mjs task-add "first task" --priority 5
 bun cli/task-console.mjs tasks
 bun cli/task-console.mjs progress
