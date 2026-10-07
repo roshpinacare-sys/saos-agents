@@ -18,6 +18,7 @@
 | `cli/task-console.mjs` | Thin CLI over the modules: atomic writes (temp + rename), corrupt-file quarantine (`.corrupt-<ts>` instead of crash-loop), honest evidence computed from the tree, and a **seeded deterministic drill** of the full task lifecycle. |
 | `cli/worklog-analytics.mjs` | Read-only analytics CLI: human summary or a stable `--json` machine channel, with an exit-code contract CI can gate on. |
 | `test/selftest.mjs` | Deterministic offline vectors (55+). The file enforces lineage floors on itself — a smaller test that still passes is treated as a lie. |
+| `tools/` | Generic git-safety CLI trio: conflict forecasting **before** the push (merge-tree dry-run), divergence visibility (never force), and a transport-refusing environment for agent-run processes. |
 | `docs/PATTERNS.md` | The ten transferable patterns behind this core, and the failure family each one answers. |
 | `docs/STATE-CONTRACT.md` | The machine-channel contract: who writes what, where, and how fresh it must be. |
 
@@ -35,6 +36,17 @@ bun cli/task-console.mjs progress
 
 # analytics over any append-only worklog
 bun cli/worklog-analytics.mjs --file worklog.md --json
+```
+
+## Git-safety tools
+
+```bash
+git remote add origin git@github.com:you/your-repo.git
+
+bash tools/divergence-check.sh main        # measure ahead/behind; never force
+bash tools/forecast-conflicts.sh main      # predict conflict files BEFORE pushing
+bash tools/gitsafety-env.sh git ls-remote https://github.com/anything.git
+# → fatal: transport 'https' not allowed   (the env layer refuses by itself)
 ```
 
 ## The core law: done-only-via-verified-push
