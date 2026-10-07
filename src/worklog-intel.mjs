@@ -12,9 +12,10 @@
 /* ── פרסור סובלני: בלוק = "Task ID:" בראש-שורה (עם-או-בלי-מפריד "---" לפני —
  * בלוקי-R245-d-ההיסטוריים-דבוקים והם-חוקיים). לא-שורות-תבליט לא-נספרות. ── */
 export function parseWorklog(text) {
-  // normalize CRLF/CR → LF BEFORE splitting: JS `$` never matches before \r and `.` never
-  // consumes it, so a Windows (autocrlf) file would yield ZERO blocks — measured, not assumed.
-  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  // normalize BOM + CRLF/CR → LF BEFORE splitting: JS `$` never matches before \r and `.` never
+  // consumes it, so a Windows (autocrlf) file yielded ZERO blocks; a UTF-8-BOM file (Notepad)
+  // also zeroed its first glued block. Measured, not assumed (R257+R258).
+  const lines = String(text ?? "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
   const blocks = [];
   let cur = null;
   let phase = "header"; // header | work | summary

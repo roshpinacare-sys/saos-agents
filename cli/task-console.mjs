@@ -25,7 +25,7 @@ import {
   createDecision, answerDecision, settleDecision, reopenDecision, cancelDecision,
   listOpen, deserializeDQ, serializeDQ,
 } from "../src/decisionqueue.mjs";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -74,6 +74,43 @@ function positional(list) {
   }
   return out;
 }
+
+/* Writer lock: atomic rename prevents corruption but NOT lost updates — measured live
+ * (20 parallel task-adds → 11 survivors; read-modify-write is not transactional across
+ * processes). O_EXCL creates the lock atomically; a stale lock (>30s) is dead-process
+ * debris and is renamed aside; short wait, then a NAMED refusal — never silence. */
+const LOCK_STALE_MS = 30_000, LOCK_WAIT_MS = 2000;
+function withLock(file, fn) {
+  mkdirSync(path.dirname(file), { recursive: true }); // fresh clone: state/ may not exist yet (R258 lesson from the re-race)
+  const lockFile = `${file}.lock`;
+  const t0 = Date.now();
+  let fd = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lockFile, "wx");
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
+          renameSync(lockFile, `${lockFile}.stale-${Date.now()}`); // atomic hand-off — one winner
+        }
+      } catch { /* already gone — retry */ }
+      if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`LOCK-BUSY: ${path.basename(lockFile)} held by another writer`);
+      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); } catch { /* no blocking — continue */ }
+    }
+  }
+  try { writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`); } catch { /* informational only */ }
+  try {
+    return fn();
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { unlinkSync(lockFile); } catch { /* already gone */ }
+  }
+}
+
+/* collision-proof id: Date.now() alone collided across two processes in the same
+ * millisecond (measured in R258) */
+const newId = (p) => `${p}-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
 /* קשירת-commit-לראיית-הדחיפה: ה-commit-חייב-להיות-קיים-ולהיות-ה-push-עצמו-או-אב-קדמון-שלו */
 function commitPushBound(commit) {
@@ -137,40 +174,44 @@ try {
     case "task-add": {
       const title = args[1];
       if (!title) throw new Error("שימוש: task-add \"<title>\" [--priority N] [--deps a,b]");
-      const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
-      const t = createTask({
-        id: flagVal("--id") ?? `T-${Date.now().toString(36).toUpperCase()}`,
-        title,
-        priority: flagVal("--priority") ?? 0,
-        deps: (flagVal("--deps") ?? "").split(",").map((s) => s.trim()).filter(Boolean),
-        assignee: flagVal("--assignee") ?? null,
+      withLock(TASKS_FILE, () => {
+        const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
+        const t = createTask({
+          id: flagVal("--id") ?? newId("T"),
+          title,
+          priority: flagVal("--priority") ?? 0,
+          deps: (flagVal("--deps") ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+          assignee: flagVal("--assignee") ?? null,
+        });
+        g.tasks.push(t);
+        atomicWrite(TASKS_FILE, serialize(g));
+        console.log(`added: ${t.id} (todo) ${t.title}`);
       });
-      g.tasks.push(t);
-      atomicWrite(TASKS_FILE, serialize(g));
-      console.log(`added: ${t.id} (todo) ${t.title}`);
       break;
     }
     case "task-set": {
       const [, id, to] = args;
       if (!id || !to) throw new Error("שימוש: task-set <id> <status>");
       if (!STATUSES.includes(to)) throw new Error(`סטטוס-לא-מוכר: ${to} (חוקי: ${STATUSES.join(",")})`);
-      const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
-      let evidence;
-      let commit;
-      if (to === "done") {
-        commit = flagVal("--commit");
-        if (!commit) {
-          throw new Error("DONE-GATE-REFUSED: done דורש --commit <sha> שנדחף-דרך-השער (done-only-via-verified-push — אין-עקיפה)");
+      withLock(TASKS_FILE, () => {
+        const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
+        let evidence;
+        let commit;
+        if (to === "done") {
+          commit = flagVal("--commit");
+          if (!commit) {
+            throw new Error("DONE-GATE-REFUSED: done דורש --commit <sha> שנדחף-דרך-השער (done-only-via-verified-push — אין-עקיפה)");
+          }
+          evidence = computeEvidence(commit);
+          console.log(`evidence: selftest=${evidence.selftestGreen && evidence.selftestFresh ? "GREEN-FRESH" : "UNFIT"} (${evidence.selftestInfo ?? "missing"}) · push=${evidence.pushRecorded ? "RECORDED" : "MISSING"} (${evidence.pushInfo ?? "missing"})`);
+          if (!evidence.pushShas.length) {
+            throw new Error(`DONE-GATE-REFUSED: ה-commit ${commit.slice(0, 7)} לא-מאומת-כדחוף-דרך-השער — דחפו-אותו-קודם (sovereign-push) ואז-נסו-שוב`);
+          }
         }
-        evidence = computeEvidence(commit);
-        console.log(`evidence: selftest=${evidence.selftestGreen && evidence.selftestFresh ? "GREEN-FRESH" : "UNFIT"} (${evidence.selftestInfo ?? "missing"}) · push=${evidence.pushRecorded ? "RECORDED" : "MISSING"} (${evidence.pushInfo ?? "missing"})`);
-        if (!evidence.pushShas.length) {
-          throw new Error(`DONE-GATE-REFUSED: ה-commit ${commit.slice(0, 7)} לא-מאומת-כדחוף-דרך-השער — דחפו-אותו-קודם (sovereign-push) ואז-נסו-שוב`);
-        }
-      }
-      setStatus(g, id, to, { evidence, reason: flagVal("--reason"), commit });
-      atomicWrite(TASKS_FILE, serialize(g));
-      console.log(`${id} → ${to}${to === "done" ? " ✓ (עבר-את-שער-הדחיפה-המאומתת)" : ""}`);
+        setStatus(g, id, to, { evidence, reason: flagVal("--reason"), commit });
+        atomicWrite(TASKS_FILE, serialize(g));
+        console.log(`${id} → ${to}${to === "done" ? " ✓ (עבר-את-שער-הדחיפה-המאומתת)" : ""}`);
+      });
       break;
     }
     case "drill": {
@@ -202,40 +243,50 @@ try {
     case "decision-add": {
       const [, kind, question] = args;
       if (!kind || !question) throw new Error("שימוש: decision-add <question|permission|merge> \"<question>\" \"<opt1>\" \"<opt2>\"...");
-      const dq = existsSync(DQ_FILE) ? deserializeDQ(readFileSync(DQ_FILE, "utf8")) : { decisions: [] };
-      const d = createDecision({ id: flagVal("--id") ?? `D-${Date.now().toString(36).toUpperCase()}`, kind, question, options: positional(args.slice(3)) });
-      dq.decisions.push(d);
-      atomicWrite(DQ_FILE, serializeDQ(dq));
-      console.log(`decision-open: ${d.id} (${d.kind}) — ${d.options.length} אפשרויות, מומלץ: ${d.options[0]?.label ?? "—"}`);
+      withLock(DQ_FILE, () => {
+        const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
+        const d = createDecision({ id: flagVal("--id") ?? newId("D"), kind, question, options: positional(args.slice(3)) });
+        dq.decisions.push(d);
+        atomicWrite(DQ_FILE, serializeDQ(dq));
+        console.log(`decision-open: ${d.id} (${d.kind}) — ${d.options.length} אפשרויות, מומלץ: ${d.options[0]?.label ?? "—"}`);
+      });
       break;
     }
     case "decision-answer": {
       const [, id, input] = args;
-      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-      const d = answerDecision(dq, id, { by: flagVal("--by") ?? "operator", optionText: input, text: flagVal("--text") });
-      atomicWrite(DQ_FILE, serializeDQ(dq));
-      console.log(`answered: ${d.id} → ${d.answer.option ?? "(טקסט-חופשי)"}${d.answer.text ? ` · "${d.answer.text}"` : ""} — settle-רק-אחרי-האפקט-בפועל`);
+      withLock(DQ_FILE, () => {
+        const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
+        const d = answerDecision(dq, id, { by: flagVal("--by") ?? "operator", optionText: input, text: flagVal("--text") });
+        atomicWrite(DQ_FILE, serializeDQ(dq));
+        console.log(`answered: ${d.id} → ${d.answer.option ?? "(טקסט-חופשי)"}${d.answer.text ? ` · "${d.answer.text}"` : ""} — settle-רק-אחרי-האפקט-בפועל`);
+      });
       break;
     }
     case "decision-settle": {
-      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-      const d = settleDecision(dq, args[1]);
-      atomicWrite(DQ_FILE, serializeDQ(dq));
-      console.log(`settled: ${d.id}`);
+      withLock(DQ_FILE, () => {
+        const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
+        const d = settleDecision(dq, args[1]);
+        atomicWrite(DQ_FILE, serializeDQ(dq));
+        console.log(`settled: ${d.id}`);
+      });
       break;
     }
     case "decision-reopen": {
-      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-      const d = reopenDecision(dq, args[1], positional(args.slice(2)).join(" "));
-      atomicWrite(DQ_FILE, serializeDQ(dq));
-      console.log(`reopened: ${d.id} — חוזר-ל-open עם-הסיבה-בהיסטוריה`);
+      withLock(DQ_FILE, () => {
+        const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
+        const d = reopenDecision(dq, args[1], positional(args.slice(2)).join(" "));
+        atomicWrite(DQ_FILE, serializeDQ(dq));
+        console.log(`reopened: ${d.id} — חוזר-ל-open עם-הסיבה-בהיסטוריה`);
+      });
       break;
     }
     case "decision-cancel": {
-      const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-      const d = cancelDecision(dq, args[1], positional(args.slice(2)).join(" "));
-      atomicWrite(DQ_FILE, serializeDQ(dq));
-      console.log(`cancelled: ${d.id}`);
+      withLock(DQ_FILE, () => {
+        const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
+        const d = cancelDecision(dq, args[1], positional(args.slice(2)).join(" "));
+        atomicWrite(DQ_FILE, serializeDQ(dq));
+        console.log(`cancelled: ${d.id}`);
+      });
       break;
     }
     default:

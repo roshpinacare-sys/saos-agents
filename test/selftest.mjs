@@ -78,6 +78,10 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
   eq("worklog-intel: CRLF clean file zero anomalies", wi.detectAnomalies(wi.computeStats(pc), { text: FIXCRLF, previousLineCount: null }).length, 0);
   eq("worklog-intel: CRLF lineCount measured", pc.lineCount, 11);
   eq("worklog-intel: bare CR parses (classic mac)", wi.parseWorklog("Task ID: M-1\rAgent: beta\rTask: mac\r\rWork Log:\r- x\r\rStage Summary:\r- y\r").blocks[0].taskId, "M-1");
+  /* BOM: a UTF-8-BOM file (Notepad) lost its first glued block — `^Task ID:` never opened behind \uFEFF. */
+  const FIXBOM = "\uFEFFTask ID: B-1\nAgent: alpha\nTask: bom\n\nWork Log:\n- x\n\nStage Summary:\n- y\n";
+  eq("worklog-intel: BOM stripped, first glued block opens", wi.parseWorklog(FIXBOM).blocks[0].taskId, "B-1");
+  eq("worklog-intel: BOM file measures clean", wi.detectAnomalies(wi.computeStats(wi.parseWorklog(FIXBOM)), { text: FIXBOM, previousLineCount: null }).length, 0);
   const cliSrc = await (async () => {
     try {
       const fsx = await import("node:fs");

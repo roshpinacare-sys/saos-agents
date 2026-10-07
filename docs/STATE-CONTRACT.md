@@ -16,7 +16,9 @@
 ## 2 · Write laws
 
 1. **One writer per file** — `tasks.json` / `decisions.json` are written only
-   through the task console (atomic: temp + rename). Push custody is written
+   through the task console (atomic: temp + rename, serialized by a per-file
+   writer lock with stale-takeover, so concurrent console processes never lose
+   updates). Push custody is written
    only by the push gate. The selftest marker is written only at the end of a
    full selftest run.
 2. **Corrupt = quarantine, not crash-loop** — an unparseable file moves to

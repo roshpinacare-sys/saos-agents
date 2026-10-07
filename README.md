@@ -76,7 +76,10 @@ because *someone else's* push was miscounted as evidence):
    parsed is moved to `.corrupt-<ts>` and the system starts clean.
 3. **One writer per file** — every machine channel in `docs/STATE-CONTRACT.md`
    has exactly one writer; everything else reads.
-4. **Atomic writes** — temp + rename, everywhere state is persisted.
+4. **Atomic writes + writer lock** — temp + rename, everywhere state is persisted. The
+   per-file writer lock (O_EXCL, stale-takeover) makes read-modify-write safe across
+   concurrent processes: atomic rename alone prevents corruption but **not** lost
+   updates (measured: 20 parallel writers → 11 survivors without the lock, 20/20 with it).
 5. **Honest refusals have names** — `DONE-GATE-REFUSED`, `AMBIGUOUS`,
    `NOT-OPEN`, `NO-MATCH` — so machines and humans see *why*, not just *no*.
 6. **Measure, don't claim** — evidence is computed from the tree at decision
