@@ -1,0 +1,30 @@
+{
+  "name": "saos-agents",
+  "version": "0.1.0",
+  "description": "Self-measuring agent orchestration core: task graph with a done-only-via-verified-push gate, operator decision queue, append-only worklog telemetry. Zero dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "bun test/selftest.mjs",
+    "analytics:selftest": "bun cli/worklog-analytics.mjs --selftest",
+    "drill": "bun cli/task-console.mjs drill --seed 252"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/roshpinacare-sys/saos-agents.git"
+  },
+  "keywords": [
+    "agents",
+    "orchestration",
+    "task-graph",
+    "decision-queue",
+    "worklog",
+    "telemetry",
+    "append-only",
+    "selftest",
+    "bun"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

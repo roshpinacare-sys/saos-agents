@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: module vectors (offline, deterministic)
+        run: bun test/selftest.mjs
+      - name: analytics selftest
+        run: bun cli/worklog-analytics.mjs --selftest
+      - name: deterministic lifecycle drill
+        run: bun cli/task-console.mjs drill --seed 252
