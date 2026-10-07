@@ -21,6 +21,7 @@
 | `tools/` | Generic git-safety CLI trio: conflict forecasting **before** the push (merge-tree dry-run), divergence visibility (never force), and a transport-refusing environment for agent-run processes. |
 | `docs/PATTERNS.md` | The ten transferable patterns behind this core, and the failure family each one answers. |
 | `docs/STATE-CONTRACT.md` | The machine-channel contract: who writes what, where, and how fresh it must be. |
+| `SECURITY.md` | Reporting policy + the hardening posture (zero deps, offline vectors, transport refusal). |
 
 ## Quick start
 

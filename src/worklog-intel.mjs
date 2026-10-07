@@ -12,7 +12,9 @@
 /* ── פרסור סובלני: בלוק = "Task ID:" בראש-שורה (עם-או-בלי-מפריד "---" לפני —
  * בלוקי-R245-d-ההיסטוריים-דבוקים והם-חוקיים). לא-שורות-תבליט לא-נספרות. ── */
 export function parseWorklog(text) {
-  const lines = String(text ?? "").split("\n");
+  // normalize CRLF/CR → LF BEFORE splitting: JS `$` never matches before \r and `.` never
+  // consumes it, so a Windows (autocrlf) file would yield ZERO blocks — measured, not assumed.
+  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const blocks = [];
   let cur = null;
   let phase = "header"; // header | work | summary
