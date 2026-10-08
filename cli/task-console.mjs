@@ -18,14 +18,15 @@
  *   bun cli/task-console.mjs drill [--seed N] [--json]
  */
 import {
-  createTask, setStatus, ready, progress, validateGraph, deserialize, serialize,
+  createTask, setStatus, ready, progress, validateGraph, deserialize,
   runDrill, STATUSES,
 } from "../src/taskgraph.mjs";
 import {
   createDecision, answerDecision, settleDecision, reopenDecision, cancelDecision,
-  listOpen, deserializeDQ, serializeDQ,
+  listOpen, deserializeDQ, validateDQ,
 } from "../src/decisionqueue.mjs";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, statSync } from "node:fs";
+import { readFileSync, renameSync, existsSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, statSync, readdirSync, fsyncSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -46,11 +47,28 @@ const flagVal = (f) => {
 };
 const FRESH_MS = 24 * 60 * 60 * 1000;
 
+/* R259 · fsync before rename: rename is atomic against other processes, but against power
+ * loss the content may never reach the platter — fsync closes that failure family (SQLite-style). */
 function atomicWrite(file, content) {
   mkdirSync(path.dirname(file), { recursive: true }); // fresh clone: state/ does not exist yet
   const tmp = `${file}.tmp-${process.pid}`;
-  writeFileSync(tmp, content);
+  const fd = openSync(tmp, "w");
+  try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(tmp, file);
+  sweepTmp(file);
+}
+/* R259 · crash-orphan hygiene: SIGKILL between write and rename leaves `file.tmp-<pid>` behind
+ * forever. Safe by construction: the per-file writer lock serializes writers, so any *.tmp-*
+ * older than 60s belongs to a dead process (measured, SIGKILL ×40). */
+function sweepTmp(file) {
+  try {
+    const dir = path.dirname(file);
+    for (const e of readdirSync(dir)) {
+      if (!e.startsWith(`${path.basename(file)}.tmp-`)) continue;
+      const p = path.join(dir, e);
+      try { if (Date.now() - statSync(p).mtimeMs > 60_000) unlinkSync(p); } catch { /* raced — next sweep */ }
+    }
+  } catch { /* dir gone — nothing to sweep */ }
 }
 function loadJson(file, fallback) {
   if (!existsSync(file)) return fallback;
@@ -58,9 +76,10 @@ function loadJson(file, fallback) {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch (e) {
     // הסגר-בסגנון-המקור: לא crash-loop — קובץ-קורום מועבר-לצד-ומתחיל-נקי
-    const quarantine = `${file}.corrupt-${Date.now()}`;
-    renameSync(file, quarantine);
-    console.error(`[task-console] קובץ-קורום-הועבר-להסגר: ${path.basename(quarantine)}`);
+    if (!existsSync(file)) return fallback; // R259: another reader quarantined it first (reader race — no ENOENT crash)
+    const quarantine = `${file}.corrupt-${Date.now()}-${process.pid}`; // pid suffix: collision-proof id (R258 lesson)
+    try { renameSync(file, quarantine); } catch { return fallback; } // vanished mid-quarantine — start clean
+    console.error(`[task-console] corrupt file quarantined: ${path.basename(quarantine)}`);
     return fallback;
   }
 }
@@ -91,8 +110,25 @@ function withLock(file, fn) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS) {
-          renameSync(lockFile, `${lockFile}.stale-${Date.now()}`); // atomic hand-off — one winner
+        // R259 · owner-liveness: SIGKILL mid-write leaves an orphan lock that blocked writes for
+        // 30s (measured). signal-0 probe — a DEAD owner (ESRCH) is stolen instantly even when the
+        // lock is fresh; the age threshold stays as the backstop for a live-but-hung owner.
+        let dead = false;
+        try {
+          const ownerPid = Number(readFileSync(lockFile, "utf8").trim().split(/\s+/)[0]);
+          const age = Date.now() - statSync(lockFile).mtimeMs;
+          if (Number.isInteger(ownerPid) && ownerPid > 0) {
+            try { process.kill(ownerPid, 0); } catch (pe) { dead = pe.code === "ESRCH"; }
+          } else {
+            // unreadable owner (empty/garbage): a process killed between lock-create and pid-write
+            // (measured in the SIGKILL storm). 250ms grace covers the µs window of a live writer
+            // that has not written its pid yet; after that it is debris.
+            dead = age > 250;
+          }
+          if (age > LOCK_STALE_MS) dead = true; // the age law stays as the backstop for a hung live owner
+        } catch { /* unreadable / vanished — retry */ }
+        if (dead) {
+          try { renameSync(lockFile, `${lockFile}.stale-${Date.now()}`); } catch { /* already gone */ } // atomic hand-off — one winner
         }
       } catch { /* already gone — retry */ }
       if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`LOCK-BUSY: ${path.basename(lockFile)} held by another writer`);
@@ -109,8 +145,19 @@ function withLock(file, fn) {
 }
 
 /* collision-proof id: Date.now() alone collided across two processes in the same
- * millisecond (measured in R258) */
-const newId = (p) => `${p}-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+ * millisecond (measured in R258); R259: Math.random().toString(36).slice(2,6) can also
+ * degenerate below 4 chars in the probability tail — randomUUID cuts the whole tail. */
+const newId = (p) => `${p}-${Date.now().toString(36).toUpperCase()}${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+
+/* R259 · validate-before-persist: deserialize refuses invalid state on READ, but nothing
+ * stopped PERSISTING invalid state (measured live: task-add with a ghost dep / duplicate id
+ * → poisoned store — every later command REFUSED until manual surgery). One choke point:
+ * nothing lands on disk without passing the module's own validator. */
+function persistValidated(file, doc, validate) {
+  const v = validate(doc);
+  if (!v.ok) throw new Error(`INVALID-STATE: ${v.errors.join(" · ")} — not saved (validate-before-persist, R259)`);
+  atomicWrite(file, JSON.stringify(doc, null, 2));
+}
 
 /* קשירת-commit-לראיית-הדחיפה: ה-commit-חייב-להיות-קיים-ולהיות-ה-push-עצמו-או-אב-קדמון-שלו */
 function commitPushBound(commit) {
@@ -173,7 +220,8 @@ try {
     }
     case "task-add": {
       const title = args[1];
-      if (!title) throw new Error("שימוש: task-add \"<title>\" [--priority N] [--deps a,b]");
+      // R259 · title guard: `task-add --id X title` silently saved the title "--id" (measured)
+      if (!title || title.startsWith("--")) throw new Error('usage: task-add "<title>" [--priority N] [--deps a,b] — the title must come before flags');
       withLock(TASKS_FILE, () => {
         const g = deserialize(loadJson(TASKS_FILE, { tasks: [] }));
         const t = createTask({
@@ -184,7 +232,7 @@ try {
           assignee: flagVal("--assignee") ?? null,
         });
         g.tasks.push(t);
-        atomicWrite(TASKS_FILE, serialize(g));
+        persistValidated(TASKS_FILE, g, validateGraph);
         console.log(`added: ${t.id} (todo) ${t.title}`);
       });
       break;
@@ -209,7 +257,7 @@ try {
           }
         }
         setStatus(g, id, to, { evidence, reason: flagVal("--reason"), commit });
-        atomicWrite(TASKS_FILE, serialize(g));
+        persistValidated(TASKS_FILE, g, validateGraph);
         console.log(`${id} → ${to}${to === "done" ? " ✓ (עבר-את-שער-הדחיפה-המאומתת)" : ""}`);
       });
       break;
@@ -247,7 +295,7 @@ try {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
         const d = createDecision({ id: flagVal("--id") ?? newId("D"), kind, question, options: positional(args.slice(3)) });
         dq.decisions.push(d);
-        atomicWrite(DQ_FILE, serializeDQ(dq));
+        persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`decision-open: ${d.id} (${d.kind}) — ${d.options.length} אפשרויות, מומלץ: ${d.options[0]?.label ?? "—"}`);
       });
       break;
@@ -257,7 +305,7 @@ try {
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
         const d = answerDecision(dq, id, { by: flagVal("--by") ?? "operator", optionText: input, text: flagVal("--text") });
-        atomicWrite(DQ_FILE, serializeDQ(dq));
+        persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`answered: ${d.id} → ${d.answer.option ?? "(טקסט-חופשי)"}${d.answer.text ? ` · "${d.answer.text}"` : ""} — settle-רק-אחרי-האפקט-בפועל`);
       });
       break;
@@ -266,7 +314,7 @@ try {
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
         const d = settleDecision(dq, args[1]);
-        atomicWrite(DQ_FILE, serializeDQ(dq));
+        persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`settled: ${d.id}`);
       });
       break;
@@ -275,7 +323,7 @@ try {
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
         const d = reopenDecision(dq, args[1], positional(args.slice(2)).join(" "));
-        atomicWrite(DQ_FILE, serializeDQ(dq));
+        persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`reopened: ${d.id} — חוזר-ל-open עם-הסיבה-בהיסטוריה`);
       });
       break;
@@ -284,7 +332,7 @@ try {
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
         const d = cancelDecision(dq, args[1], positional(args.slice(2)).join(" "));
-        atomicWrite(DQ_FILE, serializeDQ(dq));
+        persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`cancelled: ${d.id}`);
       });
       break;
