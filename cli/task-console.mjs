@@ -25,7 +25,7 @@ import {
   createDecision, answerDecision, settleDecision, reopenDecision, cancelDecision,
   listOpen, deserializeDQ, validateDQ,
 } from "../src/decisionqueue.mjs";
-import { readFileSync, renameSync, existsSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, statSync, readdirSync, fsyncSync } from "node:fs";
+import { readFileSync, renameSync, existsSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, statSync, readdirSync, fsyncSync, linkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,15 @@ function atomicWrite(file, content) {
     throw e;
   }
   try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
+  /* R262c · final ownership check (the airtight net): the rename crosses only if the
+   * lock name still points at MY claim's inode. Two writers can never BOTH pass —
+   * the name has one inode and each claim is its own unique inode — so any residual
+   * race becomes a NAMED refusal (LOCK-LOST-MIDWRITE), never a silent loss. */
+  if (ACTIVE_LOCK && ACTIVE_LOCK.file === file) {
+    let ino = null;
+    try { ino = statSync(`${file}.lock`).ino; } catch { /* lock vanished — refuse */ }
+    if (ino !== ACTIVE_LOCK.ino) throw new Error(`LOCK-LOST-MIDWRITE: ${path.basename(file)} — the lock changed under us mid-write; refusing by name (re-run), never a silent loss`);
+  }
   renameSync(tmp, file);
   sweepTmp(file);
 }
@@ -117,51 +126,105 @@ function positional(list) {
 
 /* Writer lock: atomic rename prevents corruption but NOT lost updates — measured live
  * (20 parallel task-adds → 11 survivors; read-modify-write is not transactional across
- * processes). O_EXCL creates the lock atomically; a stale lock (>30s) is dead-process
- * debris and is renamed aside; short wait, then a NAMED refusal — never silence. */
+ * processes).
+ *
+ * R262 · BORN-COMPLETE LOCKS (the surprise-round fix, measured live): the R259 lock
+ * was created EMPTY (O_EXCL) and its owner pid written AFTER acquisition
+ * ("informational only") — a µs window that became REAL under cold 20-way
+ * contention: a contender read an empty owner, aged it >250ms, STOLE a LIVE
+ * writer's lock, two writers ran the critical section → silent lost updates with
+ * every process exiting rc=0 (measured: 20 writers → 16-18 tasks, zero errors).
+ * Fix: the pid is written into a private claim file FIRST and link() promotes it
+ * to the lock name atomically — a lock can never exist without its owner pid
+ * inside (empty-owner fast-steal removed; the 30s age backstop covers foreign
+ * debris). Release verifies ownership before unlink — a stolen lock is never a
+ * stranger's to delete. Steals run under a steal-mutex + inode re-verify (a
+ * probe→rename gap otherwise lets a live successor's lock be destroyed — caught
+ * live in the decision log). And the airtight net: persist re-verifies the lock
+ * inode right before its atomic rename — two writers can never BOTH pass (the
+ * name has one inode; each claim is its own unique inode), so any residual race
+ * becomes a NAMED refusal (LOCK-LOST-MIDWRITE), never a silent loss. */
 const LOCK_STALE_MS = 30_000, LOCK_WAIT_MS = 2000;
+/* R262c · the inode of MY currently-held lock (the CLI is single-threaded — one lock at a time) */
+let ACTIVE_LOCK = null;
+function lockOwnerPid(lockFile) {
+  try {
+    const pid = Number(readFileSync(lockFile, "utf8").trim().split(/\s+/)[0]);
+    return Number.isInteger(pid) && pid > 0 ? pid : null; // null = foreign garbage (not our format)
+  } catch { return undefined; } // vanished between calls — retry
+}
+/* R262b · steals are serialized by a steal-mutex (O_EXCL on a fixed name, TTL'd):
+ * inside it the lock name is still occupied by the dead inode, so no successor can
+ * link — the check-then-act window collapses. An orphaned mutex (SIGKILL mid-steal)
+ * is age-cleared and only ever delays steals, never plain writers. */
+function stealIfDead(file, lockFile) {
+  const stealMtx = `${file}.steal`;
+  let mtx = null;
+  try { mtx = openSync(stealMtx, "wx", 0o600); } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    try { if (Date.now() - statSync(stealMtx).mtimeMs > LOCK_STALE_MS) renameSync(stealMtx, `${stealMtx}.stale-${Date.now()}`); } catch { /* racing contender moved it */ }
+    return; // another stealer is active — retry next loop
+  }
+  try {
+    const owner = lockOwnerPid(lockFile);
+    if (owner === undefined) return; // the lock vanished on its own
+    let ownerIno = null;
+    let dead = false;
+    if (owner === null) {
+      // foreign garbage: only the age law may clear it (never a fast steal)
+      try { ownerIno = statSync(lockFile).ino; dead = Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS; } catch { return; }
+    } else {
+      // R259 · owner-liveness: a DEAD owner (ESRCH) is taken over instantly; the age
+      // threshold stays as the backstop for a live-but-hung owner.
+      try { ownerIno = statSync(lockFile).ino; } catch { return; }
+      try { process.kill(owner, 0); } catch (pe) { dead = pe.code === "ESRCH"; }
+      if (!dead) { try { dead = Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS; } catch { return; } }
+    }
+    if (dead) {
+      // R262b · re-verify the inode immediately before the rename: the decision came
+      // from an earlier read — if the name already points at another inode (a live
+      // successor slipped in), the steal aborts.
+      try {
+        const inoNow = statSync(lockFile).ino;
+        if (inoNow === ownerIno) renameSync(lockFile, `${lockFile}.stale-${Date.now()}`);
+      } catch { /* the lock vanished on its own — nothing to steal */ }
+    }
+  } finally {
+    try { closeSync(mtx); } catch { /* already closed */ }
+    try { unlinkSync(stealMtx); } catch { /* already gone */ }
+  }
+}
 function withLock(file, fn) {
   mkdirSync(path.dirname(file), { recursive: true }); // fresh clone: state/ may not exist yet (R258 lesson from the re-race)
   const lockFile = `${file}.lock`;
   const t0 = Date.now();
-  let fd = null;
-  while (fd === null) {
+  for (;;) {
+    let claimed = false;
+    let ino = null;
+    const claimFile = `${lockFile}.claim-${process.pid}-${randomUUID().replaceAll("-", "").slice(0, 8)}`;
     try {
-      fd = openSync(lockFile, "wx");
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
+      const cfd = openSync(claimFile, "wx", 0o600); // born complete: the pid is inside BEFORE the lock name exists
+      try { writeSync(cfd, `${process.pid} ${new Date().toISOString()}\n`); } finally { closeSync(cfd); }
       try {
-        // R259 · owner-liveness: SIGKILL mid-write leaves an orphan lock that blocked writes for
-        // 30s (measured). signal-0 probe — a DEAD owner (ESRCH) is stolen instantly even when the
-        // lock is fresh; the age threshold stays as the backstop for a live-but-hung owner.
-        let dead = false;
-        try {
-          const ownerPid = Number(readFileSync(lockFile, "utf8").trim().split(/\s+/)[0]);
-          const age = Date.now() - statSync(lockFile).mtimeMs;
-          if (Number.isInteger(ownerPid) && ownerPid > 0) {
-            try { process.kill(ownerPid, 0); } catch (pe) { dead = pe.code === "ESRCH"; }
-          } else {
-            // unreadable owner (empty/garbage): a process killed between lock-create and pid-write
-            // (measured in the SIGKILL storm). 250ms grace covers the µs window of a live writer
-            // that has not written its pid yet; after that it is debris.
-            dead = age > 250;
-          }
-          if (age > LOCK_STALE_MS) dead = true; // the age law stays as the backstop for a hung live owner
-        } catch { /* unreadable / vanished — retry */ }
-        if (dead) {
-          try { renameSync(lockFile, `${lockFile}.stale-${Date.now()}`); } catch { /* already gone */ } // atomic hand-off — one winner
-        }
-      } catch { /* already gone — retry */ }
-      if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`LOCK-BUSY: ${path.basename(lockFile)} held by another writer`);
-      try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); } catch { /* no blocking — continue */ }
+        linkSync(claimFile, lockFile); claimed = true; // atomic: EEXIST = held; the lock is never born torn
+        try { ino = statSync(claimFile).ino; } catch { /* cannot happen: we just linked it */ }
+      } finally { try { unlinkSync(claimFile); } catch { /* already gone */ } }
+    } catch (e) {
+      try { unlinkSync(claimFile); } catch { /* already gone */ }
+      if (e.code !== "EEXIST") throw e; // our claim debris; link-EEXIST = legitimate contention
     }
-  }
-  try { writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`); } catch { /* informational only */ }
-  try {
-    return fn();
-  } finally {
-    try { closeSync(fd); } catch { /* already closed */ }
-    try { unlinkSync(lockFile); } catch { /* already gone */ }
+    if (claimed) {
+      ACTIVE_LOCK = { file, ino }; // claim-inode == lock-inode (hardlink) — captured BEFORE the claim is unlinked
+      try {
+        return fn();
+      } finally {
+        ACTIVE_LOCK = null;
+        try { if (lockOwnerPid(lockFile) === process.pid) unlinkSync(lockFile); } catch { /* already gone */ } // verify-before-unlink: never delete a stranger's lock
+      }
+    }
+    if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`LOCK-BUSY: ${path.basename(lockFile)} held by another writer`);
+    stealIfDead(file, lockFile);
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); } catch { /* no blocking — continue */ }
   }
 }
 
