@@ -20,6 +20,12 @@ export const TRANSITIONS = {
 };
 export const WEIGHTS = { done: 1.0, review: 0.75, doing: 0.4, blocked: 0.1, todo: 0, cancelled: 0 };
 
+/* R260 · machine-channel ordering law: code-unit compare, NEVER localeCompare —
+ * measured: localeCompare("a","B") = -1 (ICU) while code-unit says B<a; an ICU-less node
+ * build (or a different ICU version) reorders ready()/queues again. Operator queues are a
+ * machine contract — they may not depend on the environment's collation. */
+const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 export function canTransition(from, to) {
   return Boolean(TRANSITIONS[from]?.includes(to));
 }
@@ -93,7 +99,7 @@ export function ready(graph) {
   return graph.tasks
     .filter((t) => t.status === "todo")
     .filter((t) => t.deps.every((d) => byId.get(d)?.status === "done"))
-    .sort((a, b) => b.priority - a.priority || String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id));
+    .sort((a, b) => b.priority - a.priority || cmpStr(String(a.createdAt), String(b.createdAt)) || cmpStr(a.id, b.id)); // R260: code-unit, ICU-free
 }
 
 export function progress(graph) {
@@ -110,9 +116,15 @@ export function validateGraph(graph) {
     if (seen.has(t.id)) errors.push(`כפילות-id: ${t.id}`);
     seen.add(t.id);
     if (!STATUSES.includes(t.status)) errors.push(`סטטוס-לא-מוכר: ${t.id}=${t.status}`);
+    /* R260 · structural junk flowed straight through (measured: hand-merged state with a
+     * missing priority rendered as "Pundefined", string deps iterated char-by-char) —
+     * shape is law, named refusals over silent weirdness. */
+    if (typeof t.title !== "string" || !t.title) errors.push(`כותרת-פגומה: ${t.id}`);
+    if (!Array.isArray(t.deps)) errors.push(`deps-לא-מערך: ${t.id}`);
+    if (!Number.isFinite(Number(t.priority))) errors.push(`עדיפות-פגומה: ${t.id}`);
   }
   for (const t of graph.tasks ?? []) {
-    for (const d of t.deps ?? []) {
+    for (const d of Array.isArray(t.deps) ? t.deps : []) {
       if (!seen.has(d)) errors.push(`dep-חסר: ${t.id}→${d}`);
       if (d === t.id) errors.push(`תלות-עצמית: ${t.id}`);
     }

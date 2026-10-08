@@ -192,5 +192,91 @@ const readIf = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   rmSync(root, { recursive: true, force: true });
 }
 
+/* ── R260 · giant-round probes became law: closed argv set, no silent pretense,
+ * symlink-immune tmp (CWE-59), and a gitsafety-env whose promise matches its mechanism. ── */
+{
+  const root = sandbox();
+  const TASKS = stateFile(root, "tasks.json");
+  const DQ = stateFile(root, "decisions.json");
+  eq("R260 seed: task exists", run(root, ["task-add", "probe", "--id", "T-P"]).rc, 0);
+  eq("R260 seed: decision exists", run(root, ["decision-add", "question", "q", "a", "b", "--id", "D-1"]).rc, 0);
+
+  /* P3a — typo flag: silently ignored before (priority defaulted to 0) */
+  const beforeTypo = readIf(TASKS);
+  const typo = run(root, ["task-add", "probe", "--priorty", "5"]);
+  eq("R260 argv: typo flag refused rc=1", typo.rc, 1);
+  ok("R260 argv: named UNKNOWN-FLAG", typo.err.startsWith("REFUSED: UNKNOWN-FLAG"));
+  eq("R260 argv: state byte-identical after typo flag", readIf(TASKS), beforeTypo);
+
+  /* P3b — dash-prefixed option labels: swallowed TOGETHER WITH the next token before
+   * (decision created with 0 options, silent — and --id swallowed out of positionals too) */
+  const beforeDash = readIf(DQ);
+  const dashOpt = run(root, ["decision-add", "merge", "keep or drop", "--keep A", "--drop B"]);
+  eq("R260 argv: dash-prefixed option labels refused", dashOpt.rc, 1);
+  ok("R260 argv: named refusal names the offender", dashOpt.err.includes("--keep A"));
+  eq("R260 argv: dq state byte-identical", readIf(DQ), beforeDash);
+
+  /* P3c — reason word starting with "--" ate the word after it */
+  const reopenDash = run(root, ["decision-reopen", "D-1", "no", "--force", "needed"]);
+  eq("R260 argv: reason containing unknown --word refused", reopenDash.rc, 1);
+  ok("R260 argv: named UNKNOWN-FLAG for --force", reopenDash.err.includes("--force"));
+  eq("R260 argv: missing reason is a named usage refusal", run(root, ["decision-reopen", "D-1"]).rc, 1);
+
+  /* P1 — bare answer: silently answered with empty {by,at} before (measured rc=0) */
+  const beforeAns = readIf(DQ);
+  const bare = run(root, ["decision-answer", "D-1"]);
+  eq("R260 pretense: bare answer refused rc=1", bare.rc, 1);
+  ok("R260 pretense: named INVALID-DECISION", bare.err.includes("INVALID-DECISION"));
+  eq("R260 pretense: dq state byte-identical", readIf(DQ), beforeAns);
+  rmSync(root, { recursive: true, force: true });
+
+  /* P2 — CWE-59: plain "w" FOLLOWED a pre-placed symlink at tasks.json.tmp-<pid> and
+   * clobbered the victim outside state/ (live-proven). "wx"+0600 must refuse by name. */
+  const root2 = sandbox();
+  const wrap = path.join(root2, "wrap.mjs");
+  const victim = path.join(root2, "victim.txt");
+  writeFileSync(victim, "VICTIM-SENTINEL\n");
+  writeFileSync(wrap, `
+    import { symlinkSync, readFileSync, mkdirSync } from "node:fs";
+    import path from "node:path";
+    const target = path.resolve(process.argv[2]);
+    const repoRoot = path.dirname(path.dirname(target));
+    const victim = ${JSON.stringify(victim)};
+    const stateDir = path.join(repoRoot, ${JSON.stringify(STATE_REL)});
+    mkdirSync(stateDir, { recursive: true });
+    symlinkSync(victim, path.join(stateDir, "tasks.json.tmp-" + process.pid));
+    process.exit = (c) => { throw new Error("CLI-EXITED-" + c); }; // survive the CLI's exit to report
+    process.argv = [process.argv[0], target, "task-add", "symlink-probe"];
+    let rc = 0;
+    try { await import(target); } catch (e) {
+      const m = String(e?.message ?? e);
+      rc = m.startsWith("CLI-EXITED-") ? Number(m.slice(11)) : 9;
+      if (rc === 9) console.error("WRAPPER-FATAL", m);
+    }
+    let vs = "GONE";
+    try { vs = readFileSync(victim, "utf8") === "VICTIM-SENTINEL\\n" ? "INTACT" : "CLOBBERED"; } catch {}
+    console.log("CLIRC:" + rc + " VICTIM:" + vs);
+  `);
+  const sym = spawnSync(process.execPath, [wrap, path.join(root2, CLI_REL)], { encoding: "utf8" });
+  ok("R260 CWE-59: victim outside state/ stays INTACT (was clobbered through the symlink)", sym.stdout.includes("VICTIM:INTACT"));
+  ok("R260 CWE-59: CLI refused by name (TMP-EXISTS), rc=1", sym.stderr.includes("TMP-EXISTS") && sym.stdout.includes("CLIRC:1"));
+  eq("R260 CWE-59: no stack traces leak through the wrapper", /^\s+at /m.test(sym.stderr ?? ""), false);
+  rmSync(root2, { recursive: true, force: true });
+
+  /* P6 — gitsafety-env: the promise must equal the mechanism (the dead protocol.file.allow=user
+   * line was removed — GIT_ALLOW_PROTOCOL wins, so FILE transport was refused all along while
+   * the script promised a user exception; now the contract says: total refusal, INCLUDING file) */
+  const gitOk = spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
+  if (gitOk) {
+    const GS = path.join(REPO, PUB ? "tools" : "scripts", "gitsafety-env.sh");
+    const httpsTry = spawnSync("bash", [GS, "git", "ls-remote", "https://127.0.0.1:1/x.git"], { encoding: "utf8" });
+    ok("R260 gitsafety: https refused before any packet", httpsTry.status !== 0 && /not allowed/.test(httpsTry.stderr));
+    const fileTry = spawnSync("bash", [GS, "git", "ls-remote", REPO], { encoding: "utf8" });
+    ok("R260 gitsafety: even FILE transport refused (total law, measured)", fileTry.status !== 0 && /not allowed/.test(fileTry.stderr));
+    const sourced = spawnSync("bash", ["-c", `set -euo pipefail; source ${GS}; echo COUNT=$GIT_CONFIG_COUNT`], { encoding: "utf8" });
+    eq("R260 gitsafety: sourcing survives set -euo pipefail, 3 config lines", (sourced.stdout.match(/COUNT=(\d)/) ?? [])[1], "3");
+  }
+}
+
 console.log(`\nCLI-CONTRACT ${pass}/${pass + fail} ${fail === 0 ? "PASS" : "FAIL"}`);
 process.exit(fail === 0 ? 0 : 1);

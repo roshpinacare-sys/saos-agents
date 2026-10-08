@@ -10,6 +10,12 @@
 export const KINDS = ["question", "permission", "merge"];
 export const DQ_STATUSES = ["open", "answered", "settled", "cancelled"];
 
+/* R260 · machine-channel ordering law: code-unit compare, NEVER localeCompare —
+ * measured: localeCompare("a","B") = -1 (ICU) while code-unit says B<a, and ICU-less
+ * node builds (or a different ICU version) reorder it again. A machine channel must not
+ * depend on the environment's collation. */
+const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 function err(code, message) {
   const e = new Error(`${code}: ${message}`);
   e.code = code;
@@ -76,6 +82,12 @@ export function answerDecision(dq, id, { by = "operator", optionIndex = null, op
     idx = matchOption(d.options, optionText);
     chosen = d.options[idx].label;
   }
+  /* R260 · measured live: bare `decision-answer <id>` (no option, no text) persisted
+   * answer={by,at} and silently closed the decision — a decision was pretended without
+   * saying anything. An answer must SAY something: an option or non-empty text. */
+  if (chosen === null && !(typeof text === "string" && text.trim().length > 0)) {
+    throw err("INVALID-DECISION", "תשובה-חייבת-תוכן: אפשרות (מזהה/טקסט) או ‎--text \"...\" — לא-תשובה-ריקה-שמתחזה-להחלטה");
+  }
   const when = at ?? new Date().toISOString();
   d.answer = { ...(chosen ? { optionIndex: idx, option: chosen } : {}), ...(text ? { text: String(text) } : {}), by, at: when };
   d.statusHistory.push({ from: d.status, to: "answered", at: when });
@@ -118,7 +130,7 @@ export function cancelDecision(dq, id, reason, { at } = {}) {
 export function listOpen(dq) {
   return (dq.decisions ?? [])
     .filter((d) => d.status === "open")
-    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id));
+    .sort((a, b) => cmpStr(String(a.createdAt), String(b.createdAt)) || cmpStr(a.id, b.id)); // R260: code-unit, ICU-free
 }
 
 export function validateDQ(dq) {
@@ -129,6 +141,10 @@ export function validateDQ(dq) {
     seen.add(d.id);
     if (!KINDS.includes(d.kind)) errors.push(`סוג-לא-מוכר: ${d.id}=${d.kind}`);
     if (!DQ_STATUSES.includes(d.status)) errors.push(`סטטוס-לא-מוכר: ${d.id}=${d.status}`);
+    /* R260 · structural junk (hand-merged state) reached the rendering paths as an
+     * engine-dependent TypeError ("undefined is not an object (evaluating
+     * 'd.options.forEach)'") instead of a named refusal — measured. Shape is law. */
+    if (!Array.isArray(d.options) || d.options.some((o) => !o || typeof o.label !== "string")) errors.push(`אפשרויות-פגומות: ${d.id}`);
     if (d.status === "answered" && !d.answer) errors.push(`answered-בלי-תשובה: ${d.id}`);
     if (d.status === "settled" && !d.answer) errors.push(`settled-בלי-תשובה: ${d.id}`);
   }
