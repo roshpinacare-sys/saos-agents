@@ -12,10 +12,12 @@
 /* ── פרסור סובלני: בלוק = "Task ID:" בראש-שורה (עם-או-בלי-מפריד "---" לפני —
  * בלוקי-R245-d-ההיסטוריים-דבוקים והם-חוקיים). לא-שורות-תבליט לא-נספרות. ── */
 export function parseWorklog(text) {
-  // normalize BOM + CRLF/CR → LF BEFORE splitting: JS `$` never matches before \r and `.` never
-  // consumes it, so a Windows (autocrlf) file yielded ZERO blocks; a UTF-8-BOM file (Notepad)
-  // also zeroed its first glued block. Measured, not assumed (R257+R258).
-  const lines = String(text ?? "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
+  // normalize BOM + ALL ECMAScript line terminators → LF BEFORE splitting: JS `$` never matches
+  // before \r and `.` never consumes it, so a Windows (autocrlf) file yielded ZERO blocks; a UTF-8-BOM
+  // file (Notepad) zeroed its first glued block (R257+R258); U+2028/U+2029 (emitted raw by
+  // JSON.stringify since ES2019) zeroed glued headers the same way (R259 fuzz, measured). \u0085 is
+  // NOT an ECMAScript terminator and stays within-line. Measured, not assumed.
+  const lines = String(text ?? "").replace(/^\uFEFF/, "").replace(/\r\n?|[\u2028\u2029]/g, "\n").split("\n");
   const blocks = [];
   let cur = null;
   let phase = "header"; // header | work | summary

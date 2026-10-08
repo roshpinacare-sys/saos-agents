@@ -82,6 +82,30 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
   const FIXBOM = "\uFEFFTask ID: B-1\nAgent: alpha\nTask: bom\n\nWork Log:\n- x\n\nStage Summary:\n- y\n";
   eq("worklog-intel: BOM stripped, first glued block opens", wi.parseWorklog(FIXBOM).blocks[0].taskId, "B-1");
   eq("worklog-intel: BOM file measures clean", wi.detectAnomalies(wi.computeStats(wi.parseWorklog(FIXBOM)), { text: FIXBOM, previousLineCount: null }).length, 0);
+  /* R259 · mutation engine (Stryker-style): 30 mutants measured; 17 survived the existing net
+   * → every vector below kills one measured survivor (kill-rate 43%→100%). A vector with no
+   * mutation victim is decoration, not a test. */
+  const FIXAVG = "---\nTask ID: A-1\nAgent: a\nTask: avg\n\nWork Log:\n- one\n\nStage Summary:\n- s\n---\nTask ID: A-2\nAgent: a\nTask: avg\n\nWork Log:\n- one\n\nStage Summary:\n- s\n---\nTask ID: A-3\nAgent: a\nTask: avg\n\nWork Log:\n- one\n- two\n\nStage Summary:\n- s\n";
+  eq("worklog-intel: avgWorkBullets rounds to 2 decimals (kills M03)", wi.computeStats(wi.parseWorklog(FIXAVG)).avgWorkBullets, 1.33);
+  const FIXTOP = "Task ID: P-1\nAgent: beta\nTask: t\n\nWork Log:\n- x\n\nStage Summary:\n- s\nTask ID: P-2\nAgent: alpha\nTask: t\n\nWork Log:\n- x\n\nStage Summary:\n- s\nTask ID: P-3\nAgent: alpha\nTask: t\n\nWork Log:\n- x\n\nStage Summary:\n- s\n";
+  eq("worklog-intel: topAgents sorted by blocks desc (kills M04)", wi.computeStats(wi.parseWorklog(FIXTOP)).topAgents[0], { agent: "alpha", blocks: 2 });
+  const FIXDUP = "Task ID: T-B\nAgent: a\nTask: t\n\nStage Summary:\n- s\nTask ID: T-A\nAgent: a\nTask: t\n\nStage Summary:\n- s\nTask ID: T-B\nAgent: b\nTask: t\n\nStage Summary:\n- s\nTask ID: T-A\nAgent: b\nTask: t\n\nStage Summary:\n- s\n";
+  eq("worklog-intel: duplicates tie-break taskId asc (kills M05)", wi.computeStats(wi.parseWorklog(FIXDUP)).duplicates.map((d) => d.taskId), ["T-A", "T-B"]);
+  eq("worklog-intel: floor boundary equal is NOT below (kills M06)", wi.detectAnomalies(wiStats, { minLines: wiStats.lineCount }).some((a) => a.kind === "below-floor"), false);
+  eq("worklog-intel: floor boundary minus-1 IS below", wi.detectAnomalies(wiStats, { minLines: wiStats.lineCount + 1 }).some((a) => a.kind === "below-floor"), true);
+  const FIXMS1 = "Task ID: S-1\nAgent: a\nTask: t\n\nWork Log:\n- x\n";
+  eq("worklog-intel: exactly-1 missing summary still fires (kills M07)", wi.detectAnomalies(wi.computeStats(wi.parseWorklog(FIXMS1)), { text: FIXMS1 }).some((a) => a.kind === "missing-stage-summary"), true);
+  eq("worklog-intel: startLine 1-based exact (kills M08)", parsed.blocks.map((b) => b.startLine), [4, 16, 24]);
+  eq("worklog-intel: endLine boundary exact (kills M09)", [parsed.blocks[0].endLine, parsed.blocks.at(-1).endLine], [15, 27]);
+  const FIXNOAG = "Task ID: N-1\nTask: t\n\nStage Summary:\n- s\n";
+  eq("worklog-intel: agentless block keyed (kills M10)", wi.computeStats(wi.parseWorklog(FIXNOAG)).perAgent["(ללא-סוכן)"], 1);
+    eq("worklog-intel: taskId trimmed (kills M13)", wi.parseWorklog("Task ID:   T-9  \nAgent: a\nTask: t\n").blocks[0].taskId, "T-9");
+  /* R259 · fuzz caught: U+2028/U+2029 (ECMAScript line terminators — JSON.stringify emits them raw
+   * since ES2019) glued before a header silently zeroed blocks — same silent-death family as
+   * CRLF/BOM; now all normalized. */
+  const FIXUSEP = "prose\u2028Task ID: U-1\nAgent: a\nTask: t\n\u2029Task ID: U-2\nAgent: b\nTask: t2\n";
+  eq("worklog-intel: U+2028/U+2029 glued headers parse (fuzz class)", wi.parseWorklog(FIXUSEP).blocks.map((b) => b.taskId), ["U-1", "U-2"]);
+  eq("worklog-intel: U+2028/U+2029 lineCount measured", wi.parseWorklog(FIXUSEP).lineCount, 9);
   const cliSrc = await (async () => {
     try {
       const fsx = await import("node:fs");
@@ -187,6 +211,27 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
   eq("decisionqueue: listOpen oldest-first", dq.listOpen(q5).map((d) => d.id), ["EARLY", "LATE"]);
   eq("decisionqueue: validate catches ghost answer", dq.validateDQ({ decisions: [{ ...dq.createDecision({ id: "G", kind: "question", question: "x", options: ["a"] }), status: "answered", answer: null }] }).ok, false);
   eq("decisionqueue: dq roundtrip", dq.serializeDQ(dq.deserializeDQ(dq.serializeDQ(q2))), dq.serializeDQ(q2));
+  /* R259 · mutation engine — the kills that remained in taskgraph/decisionqueue: */
+  const gr = G();
+  tg.setStatus(gr, "A", "doing"); tg.setStatus(gr, "A", "review");
+  eq("taskgraph: progress weights review=0.75 (kills M14)", tg.progress(gr), 0.25);
+  eq("taskgraph: createTask dedupes deps (kills M17)", tg.createTask({ id: "DD", title: "d", deps: ["A", "A", "A"] }).deps, ["A"]);
+  eq("taskgraph: validate catches duplicate id (kills M18)", tg.validateGraph({ tasks: [tg.createTask({ id: "D", title: "1" }), tg.createTask({ id: "D", title: "2" })] }).errors.some((e) => e.includes("כפילות-id")), true);
+  caught = null;
+  try { tg.createTask({ id: "SD", title: "s", deps: ["SD"] }); } catch (e) { caught = e.code; }
+  eq("taskgraph: createTask refuses self-dep (kills M20)", caught, "SELF-DEP");
+  eq("taskgraph: validate catches self-dep (kills M20b)", tg.validateGraph({ tasks: [{ id: "SD", title: "s", status: "todo", deps: ["SD"] }] }).errors.some((e) => e.includes("תלות-עצמית")), true);
+  const gsh = G();
+  tg.setStatus(gsh, "A", "doing"); tg.setStatus(gsh, "A", "review");
+  gsh.tasks[0].commit = sha;
+  caught = null;
+  try { tg.setStatus(gsh, "A", "done", { evidence: { selftestGreen: true, selftestFresh: true, pushRecorded: true, pushShas: ["sha-OTHER"] }, commit: sha }); } catch (e) { caught = e.code; }
+  eq("taskgraph: done-gate binds commit to push evidence (kills M21)", caught, "DONE-GATE-REFUSED");
+  eq("taskgraph: mulberry32 coerces seed to uint32 (kills M22)", tg.mulberry32(2 ** 32)(), tg.mulberry32(0)());
+  eq("decisionqueue: match caseless ascii (kills M23)", dq.matchOption([{ label: "APPROVE" }, { label: "DENY" }], "approve"), 0);
+  caught = null;
+  try { dq.matchOption([{ label: "A" }, { label: "B" }], "0"); } catch (e) { caught = e.code; }
+  eq("decisionqueue: numeric 0 refused (kills M25)", caught, "NO-MATCH");
 }
 
 /* lineage: the measured enemy is silent shrinkage of this file itself —
