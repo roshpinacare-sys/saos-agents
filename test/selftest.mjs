@@ -106,6 +106,12 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
   const FIXUSEP = "prose\u2028Task ID: U-1\nAgent: a\nTask: t\n\u2029Task ID: U-2\nAgent: b\nTask: t2\n";
   eq("worklog-intel: U+2028/U+2029 glued headers parse (fuzz class)", wi.parseWorklog(FIXUSEP).blocks.map((b) => b.taskId), ["U-1", "U-2"]);
   eq("worklog-intel: U+2028/U+2029 lineCount measured", wi.parseWorklog(FIXUSEP).lineCount, 9);
+  /* R259 · live mutation engine: MUT-C (weakened anchor ^\s*Task ID:) SURVIVED the 983-vector
+   * net in a live measurement — an indented body line beginning with Task ID (quote/indent)
+   * must stay silent body text, never open a phantom block. This vector kills it. */
+  const FIXINDENT = "Task ID: K-1\nAgent: a\nTask: anchor\n\nWork Log:\n- real bullet\n  Task ID: ghost indented quote\n\nStage Summary:\n- s\n";
+  eq("worklog-intel: indented Task ID stays body text — no phantom block (kills MUT-C)", wi.parseWorklog(FIXINDENT).blocks.length, 1);
+  eq("worklog-intel: phantom ghost taskId never becomes a block", wi.parseWorklog(FIXINDENT).blocks.map((b) => b.taskId).includes("ghost"), false);
   const cliSrc = await (async () => {
     try {
       const fsx = await import("node:fs");
