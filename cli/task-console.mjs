@@ -40,10 +40,18 @@ const PUSH_FILE = path.join(STATE, "push-custody.json");
 
 const args = process.argv.slice(2);
 const cmd = args[0] ?? "";
+/* R260 · the argv contract is a CLOSED set — measured live: a typo flag (--priorty) was
+ * silently ignored (priority defaulted to 0), option labels starting with "--" were
+ * swallowed TOGETHER WITH the next token (decision-add "--keep A" "--drop B" → 0 options,
+ * silent), and a reason word starting with "--" ate the word after it. Named refusal ≥
+ * silent swallowing. */
+const KNOWN_FLAGS = new Set(["--json", "--priority", "--deps", "--assignee", "--id", "--commit", "--reason", "--by", "--text", "--seed", "--help"]);
+const VALUE_FLAGS = new Set(["--priority", "--deps", "--assignee", "--id", "--commit", "--reason", "--by", "--text", "--seed"]);
 const has = (f) => args.includes(f);
 const flagVal = (f) => {
   const i = args.indexOf(f);
-  return i >= 0 ? args[i + 1] : undefined;
+  const v = i >= 0 ? args[i + 1] : undefined;
+  return v === undefined || v.startsWith("--") ? undefined : v; // never swallow a following flag as a value
 };
 const FRESH_MS = 24 * 60 * 60 * 1000;
 
@@ -52,7 +60,18 @@ const FRESH_MS = 24 * 60 * 60 * 1000;
 function atomicWrite(file, content) {
   mkdirSync(path.dirname(file), { recursive: true }); // fresh clone: state/ does not exist yet
   const tmp = `${file}.tmp-${process.pid}`;
-  const fd = openSync(tmp, "w");
+  let fd;
+  try {
+    /* R260 · "wx" + 0600 (O_EXCL): measured — plain "w" FOLLOWS a pre-placed symlink at
+     * tmp-<pid> and clobbers the victim it points at (CWE-59, live-proven with a same-pid
+     * wrapper: a file outside state/ was overwritten with the state JSON). O_EXCL refuses
+     * any existing entry — symlink or crash debris — and 0600 keeps the half-written
+     * state private. */
+    fd = openSync(tmp, "wx", 0o600);
+  } catch (e) {
+    if (e.code === "EEXIST") throw new Error(`TMP-EXISTS: ${path.basename(tmp)} already exists (symlink-or-debris) — refused by name, never bypassed; debris older than 60s is swept by sweepTmp`);
+    throw e;
+  }
   try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(tmp, file);
   sweepTmp(file);
@@ -84,11 +103,13 @@ function loadJson(file, fallback) {
   }
 }
 
-/* פוזיציונליים-בלבד: מדלג-על --flag וגם-על-ערכו (הצולע-שגרם ל-D-VIS-בעלת-3-אפשרויות) */
+/* Positionals: skip only KNOWN value-flags (+ their value) — R260: everything reaching
+ * here already passed the UNKNOWN-FLAG gate, so what remains is content or a known
+ * value-flag. No silent swallowing. */
 function positional(list) {
   const out = [];
   for (let i = 0; i < list.length; i++) {
-    if (list[i].startsWith("--")) { i++; continue; }
+    if (VALUE_FLAGS.has(list[i])) { i++; continue; }
     out.push(list[i]);
   }
   return out;
@@ -203,6 +224,11 @@ function printHelp() {
 }
 
 try {
+  for (const t of args.slice(1)) {
+    if (t.startsWith("--") && !KNOWN_FLAGS.has(t)) {
+      throw new Error(`UNKNOWN-FLAG: ${t} — argv is a closed contract; an unknown dash-flag is not content (known: ${[...KNOWN_FLAGS].join(" ")})`);
+    }
+  }
   switch (cmd) {
     case "tasks":
     case "progress": {
@@ -320,18 +346,22 @@ try {
       break;
     }
     case "decision-reopen": {
+      const reason = positional(args.slice(2)).join(" ");
+      if (!reason) throw new Error('usage: decision-reopen <id> "<reason>" — the reason is required (it is preserved in history)');
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-        const d = reopenDecision(dq, args[1], positional(args.slice(2)).join(" "));
+        const d = reopenDecision(dq, args[1], reason);
         persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`reopened: ${d.id} — חוזר-ל-open עם-הסיבה-בהיסטוריה`);
       });
       break;
     }
     case "decision-cancel": {
+      const reason = positional(args.slice(2)).join(" ");
+      if (!reason) throw new Error('usage: decision-cancel <id> "<reason>" — the reason is required');
       withLock(DQ_FILE, () => {
         const dq = deserializeDQ(loadJson(DQ_FILE, { decisions: [] }));
-        const d = cancelDecision(dq, args[1], positional(args.slice(2)).join(" "));
+        const d = cancelDecision(dq, args[1], reason);
         persistValidated(DQ_FILE, dq, validateDQ);
         console.log(`cancelled: ${d.id}`);
       });

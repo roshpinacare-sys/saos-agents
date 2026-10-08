@@ -17,11 +17,14 @@ gitsafety_env() {
   export GIT_ALLOW_PROTOCOL="agentcraft-none"
   export GIT_TERMINAL_PROMPT="0"
   # 3) protocol contract via env-config (zero mutation of .git/config)
-  export GIT_CONFIG_COUNT="4"
+  # R260 · measured: GIT_ALLOW_PROTOCOL WINS over the env-config, so the previous
+  # protocol.file.allow=user line was a DEAD promise (a local ls-remote was refused
+  # rc=128 anyway). The real contract is TOTAL refusal INCLUDING file — now the
+  # script says so out loud and the cli-contract vectors hold it in place.
+  export GIT_CONFIG_COUNT="3"
   export GIT_CONFIG_KEY_0="protocol.allow"        GIT_CONFIG_VALUE_0="never"
   export GIT_CONFIG_KEY_1="protocol.https.allow"  GIT_CONFIG_VALUE_1="never"
   export GIT_CONFIG_KEY_2="protocol.http.allow"   GIT_CONFIG_VALUE_2="never"
-  export GIT_CONFIG_KEY_3="protocol.file.allow"   GIT_CONFIG_VALUE_3="user"
 }
 if [[ $# -gt 0 ]]; then
   gitsafety_env
