@@ -349,5 +349,54 @@ const readIf = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   }
 }
 
+/* ── R264 — id-canon + short-write law (surprise-round findings, each live-proven before the fix) ── */
+{
+  /* NFC/NFD twins: measured live — both were accepted as DISTINCT tasks (a duplicate
+   * bypass by byte-identity). Canon intake collapses them; the twin is refused by name. */
+  const root = sandbox();
+  eq("R264 canon: NFC id accepted", run(root, ["task-add", "twin-nfc", "--id", "caf\u00e9"]).rc, 0);
+  const beforeTwin = readIf(stateFile(root, "tasks.json"));
+  const twin = run(root, ["task-add", "twin-nfd", "--id", "cafe\u0301"]);
+  eq("R264 canon: NFD twin refused rc=1", twin.rc, 1);
+  ok("R264 canon: twin refusal named (duplicate-id)", twin.err.includes("כפילות-id"));
+  eq("R264 canon: state byte-identical after twin refusal", readIf(stateFile(root, "tasks.json")), beforeTwin);
+  eq("R264 canon: NFD dep resolves against NFC id (canon intake)", run(root, ["task-add", "dep-canon", "--id", "DEP-CANON", "--deps", "cafe\u0301"]).rc, 0);
+  rmSync(root, { recursive: true, force: true });
+
+  /* Hand-merged junk state: numeric and non-NFC ids used to pass silently (rc=0) —
+   * shape is law now: named refusal at read-deserialize, the junk file stays untouched. */
+  const root2 = sandbox();
+  const ST2 = stateFile(root2, "tasks.json");
+  mkdirSync(path.dirname(ST2), { recursive: true });
+  const junkDoc = JSON.stringify({ tasks: [{ id: 123, title: "num", status: "todo", priority: 0, deps: [] }] });
+  writeFileSync(ST2, junkDoc);
+  const junk = run(root2, ["task-add", "fresh", "--id", "fresh-x"]);
+  eq("R264 shape: numeric id named at read (INVALID-GRAPH), rc=1", junk.rc, 1);
+  ok("R264 shape: named id-פגום", junk.err.includes("id-פגום"));
+  eq("R264 shape: junk file untouched by the refusal", readIf(ST2), junkDoc);
+  writeFileSync(ST2, JSON.stringify({ tasks: [{ id: "cafe\u0301", title: "nfd", status: "todo", priority: 0, deps: [] }] }));
+  const nfd = run(root2, ["task-add", "fresh2", "--id", "fresh-x2"]);
+  ok("R264 shape: non-NFC id named (id-אינו-מנורמל-NFC)", nfd.rc === 1 && nfd.err.includes("id-אינו-מנורמל-NFC"));
+  rmSync(root2, { recursive: true, force: true });
+
+  /* Short-write law: POSIX write() may legally return short (measured live: state 18.5KB
+   * under `ulimit -f 1` → a truncated 512-byte JSON was PUBLISHED via rename with exit 0 —
+   * 41 tasks silently lost). Law: loop till every byte lands; a short/stalled write is a
+   * NAMED refusal — a partial tmp is never renamed (SQLite/Postgres complete-write law). */
+  const bashOk = spawnSync("bash", ["-c", "ulimit -f 1 && echo ok"], { encoding: "utf8" }).status === 0;
+  if (bashOk) {
+    const root3 = sandbox();
+    const ST3 = stateFile(root3, "tasks.json");
+    for (let i = 0; i < 40; i++) run(root3, ["task-add", "bulk-" + i, "--id", "b" + i]);
+    const before = readIf(ST3);
+    const killed = spawnSync("bash", ["-c", `ulimit -f 1; exec "${process.execPath}" "${path.join(root3, CLI_REL)}" task-add beyond --id doomed`], { encoding: "utf8" });
+    eq("R264 short-write: refused rc=1 (never torn, never silent)", killed.status, 1);
+    ok("R264 short-write: named refusal (EFBIG/SHORT-WRITE)", (killed.stderr ?? "").includes("REFUSED:"));
+    eq("R264 short-write: old state byte-identical on disk", readIf(ST3), before);
+    eq("R264 short-write: healthy write lands afterwards", run(root3, ["task-add", "post-law", "--id", "post-law"]).rc, 0);
+    rmSync(root3, { recursive: true, force: true });
+  }
+}
+
 console.log(`\nCLI-CONTRACT ${pass}/${pass + fail} ${fail === 0 ? "PASS" : "FAIL"}`);
 process.exit(fail === 0 ? 0 : 1);

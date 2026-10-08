@@ -32,13 +32,20 @@ export function canTransition(from, to) {
 
 export function createTask({ id, title, priority = 0, deps = [], assignee = null, commit = null, createdAt }) {
   if (!id || !title) throw err("INVALID-TASK", "id ו-title חובה");
-  for (const d of deps) if (d === id) throw err("SELF-DEP", `משימה ${id} תלויה-בעצמה`);
+  /* R264 · חוק-קנון-ה-id: id הוא-מפתח-מכונה — מנורמל-NFC (ה-normalize של ECMA-262
+   * מוגדר-בספק ואינו-תלוי-ICU; אומת-בייט-זהה bun↔node), כך שתאומים-בעלי-חזות
+   * זהה ("café" מול "cafe"+U+0301) לעולם לא יעקפו זיהוי-כפילויות. נמדד-חי: שני
+   * התאומים התקבלו כשתי משימות-שונות. deps מנורמלים-כך-שהפניה תמיד תמצא את
+ * ה-id-הקנוני; הכותרת נשארת מילולית-בייט — תוכן-המשתמש לא-משתנה בשקט. */
+  const canonId = String(id).normalize("NFC");
+  const canonDeps = deps.map((d) => String(d).normalize("NFC"));
+  for (const d of canonDeps) if (d === canonId) throw err("SELF-DEP", `משימה ${canonId} תלויה-בעצמה`);
   const at = createdAt ?? new Date().toISOString();
   return {
-    id, title,
+    id: canonId, title,
     status: "todo",
     priority: Number(priority) || 0,
-    deps: [...new Set(deps)],
+    deps: [...new Set(canonDeps)],
     assignee,
     commit,
     createdAt: at,
@@ -122,6 +129,11 @@ export function validateGraph(graph) {
     if (typeof t.title !== "string" || !t.title) errors.push(`כותרת-פגומה: ${t.id}`);
     if (!Array.isArray(t.deps)) errors.push(`deps-לא-מערך: ${t.id}`);
     if (!Number.isFinite(Number(t.priority))) errors.push(`עדיפות-פגומה: ${t.id}`);
+    /* R264 · חוק-צורת-ה-id: state-ממוזג-יד שנשא id לא-מחרוזת / ריק / לא-מנורמל-NFC
+     * עבר-בשקט (נמדד-חי: id-מספרי-123 ותאום-NFD התקבלו עם rc=0 וכתיבה-על-גביהם
+     * המשיכה) — הצורה היא-חוק, סירוב-נקוב על-פני-מוזרות-שקטה. */
+    if (typeof t.id !== "string" || !t.id) errors.push(`id-פגום: ${String(t.id)}`);
+    else if (t.id !== t.id.normalize("NFC")) errors.push(`id-אינו-מנורמל-NFC: ${t.id}`);
   }
   for (const t of graph.tasks ?? []) {
     for (const d of Array.isArray(t.deps) ? t.deps : []) {

@@ -55,6 +55,21 @@ const flagVal = (f) => {
 };
 const FRESH_MS = 24 * 60 * 60 * 1000;
 
+/* R264 · complete-write law: POSIX write() may LEGALLY return short (RLIMIT_FSIZE,
+ * ENOSPC-at-edge, signals) — a silent short write lands a TORN state file via rename
+ * with rc=0. Measured live: state 18.5KB under `ulimit -f 1` → a truncated 512-byte
+ * JSON was published by rename with exit 0 and 41 tasks silently lost (exactly the
+ * family the law forbids). The law: loop until every byte is written; a write that
+ * stalls (0 progress) or errors becomes a NAMED refusal — a partial tmp is never
+ * renamed (the SQLite/Postgres complete-write discipline). */
+function writeAll(fd, buf) {
+  let at = 0;
+  while (at < buf.length) {
+    const n = writeSync(fd, buf, at, buf.length - at);
+    if (!(n > 0)) throw new Error(`SHORT-WRITE: ${n} bytes at offset ${at} — refusing to publish a torn file`);
+    at += n;
+  }
+}
 /* R259 · fsync before rename: rename is atomic against other processes, but against power
  * loss the content may never reach the platter — fsync closes that failure family (SQLite-style). */
 function atomicWrite(file, content) {
@@ -73,7 +88,7 @@ function atomicWrite(file, content) {
     throw e;
   }
   try {
-    try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
+    try { writeAll(fd, Buffer.from(content, "utf8")); fsyncSync(fd); } finally { closeSync(fd); }
     /* R263 · TEST-ONLY SEAM (inert by default): a deterministic fault-injection
      * window for the contract's lock-hijack vector — yields BEFORE the ownership
      * check so the external hijacker can swap the lock mid-critical-section.
@@ -99,6 +114,15 @@ function atomicWrite(file, content) {
     throw e;
   }
   sweepTmp(file);
+  /* R264 · dir-fsync: the rename ENTRY itself must survive power loss too (SQLite's
+   * unixSync directory-fsync law). Best-effort by nature: platforms that cannot open a
+   * directory fd degrade to the R259 status quo — durability only ever grows and never
+   * manufactures a new failure: a write that already landed is never turned into an
+   * error because of the dir-fsync. */
+  try {
+    const dfd = openSync(path.dirname(file), "r");
+    try { fsyncSync(dfd); } finally { closeSync(dfd); }
+  } catch { /* best-effort — the file fsync already holds */ }
 }
 /* R259 · crash-orphan hygiene: SIGKILL between write and rename leaves `file.tmp-<pid>` behind
  * forever. Safe by construction: the per-file writer lock serializes writers, so any *.tmp-*
@@ -219,7 +243,8 @@ function withLock(file, fn) {
     const claimFile = `${lockFile}.claim-${process.pid}-${randomUUID().replaceAll("-", "").slice(0, 8)}`;
     try {
       const cfd = openSync(claimFile, "wx", 0o600); // born complete: the pid is inside BEFORE the lock name exists
-      try { writeSync(cfd, `${process.pid} ${new Date().toISOString()}\n`); } finally { closeSync(cfd); }
+      /* R264 · the claim is written under the complete-write law too — a lock born torn is a lying lock. */
+      try { writeAll(cfd, Buffer.from(`${process.pid} ${new Date().toISOString()}\n`, "utf8")); } finally { closeSync(cfd); }
       try {
         linkSync(claimFile, lockFile); claimed = true; // atomic: EEXIST = held; the lock is never born torn
         try { ino = statSync(claimFile).ino; } catch { /* cannot happen: we just linked it */ }
