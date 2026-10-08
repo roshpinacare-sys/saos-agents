@@ -130,8 +130,19 @@ const readIf = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   eq("orphan lock (dead pid, fresh mtime): stolen instantly", run(root, ["task-add", "after-sigkill"]).rc, 0);
   writeFileSync(`${TASKS}.lock`, `${process.pid} live-owner`);
   eq("live-owner lock: honored (pid probe must not steal live writers)", run(root, ["task-add", "live-blocked"]).rc, 1);
-  writeFileSync(`${TASKS}.lock`, ""); // killed between lock-create and pid-write
-  eq("empty-owner lock: writer recovers via the grace law (~250ms, then steal)", run(root, ["task-add", "grace-window"]).rc, 0);
+  /* R262 · LAW CHANGE: the 250ms empty-owner grace-steal is GONE — stealing an
+   * empty lock quickly was exactly the silent-loss bug (a slow LIVE writer's
+   * fresh lock looked like debris; born-complete locks make empty locks
+   * structurally impossible from this CLI, so an empty lock is now FOREIGN
+   * debris and only the 30s age backstop may clear it). Asserted both sides:
+   * fresh garbage is honored-then-named-refused (never stolen, never silent),
+   * aged garbage (>30s, mtime pre-aged via utimes) is cleared. */
+  writeFileSync(`${TASKS}.lock`, ""); // foreign debris, fresh mtime
+  const bytesBefore = readIf(TASKS);
+  eq("empty-owner fresh garbage: LOCK-BUSY named refusal (never fast-steal)", run(root, ["task-add", "fresh-garbage"]).rc, 1);
+  eq("empty-owner fresh garbage: state bytes untouched", readIf(TASKS), bytesBefore);
+  utimesSync(`${TASKS}.lock`, new Date(Date.now() - 40_000), new Date(Date.now() - 40_000));
+  eq("empty-owner aged garbage: cleared by the 30s age law", run(root, ["task-add", "aged-garbage"]).rc, 0);
   rmSync(root, { recursive: true, force: true });
 }
 
@@ -177,18 +188,28 @@ const readIf = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   rmSync(root, { recursive: true, force: true });
 }
 
-/* ── race: 12 concurrent writers, zero lost updates ── */
+/* ── race: 12 TRULY-concurrent writers, zero silent lost updates (R262) ──
+ * R259's vector called spawnSync inside Array.from — the "12 parallel writers"
+ * ran SEQUENTIALLY (each spawnSync blocks until exit), so the born-INCOMPLETE
+ * lock's silent-loss window shipped green while measured live under real
+ * concurrency: 20 writers → 16-18 tasks on disk with every process exiting 0
+ * (an empty lock got stolen from a LIVE writer >250ms into its pid-write gap,
+ * two writers ran the critical section, last-persist wins). R262 fix:
+ * born-complete locks (pid inside the claim BEFORE the lock name exists,
+ * promoted by atomic link()) + verify-before-unlink. This vector now spawns
+ * REAL concurrent processes and judges survivorship AND on-disk completeness. */
 {
   const root = sandbox();
   const TASKS = stateFile(root, "tasks.json");
+  const { spawn } = await import("node:child_process");
   const procs = Array.from({ length: 12 }, (_, i) =>
-    spawnSync(process.execPath, [path.join(root, CLI_REL), "task-add", `racer-${i}`], { encoding: "utf8" }));
-  const survivorsN = procs.filter((p) => p.status === 0).length;
-  eq("race: 12/12 writers survive", survivorsN, 12);
+    spawn(process.execPath, [path.join(root, CLI_REL), "task-add", `racer-${i}`], { stdio: "ignore" }));
+  const codes = await Promise.all(procs.map((p) => new Promise((res) => p.on("exit", (c) => res(c)))));
+  eq("race: 12/12 CONCURRENT writers exit 0", codes.filter((c) => c === 0).length, 12);
   const onDisk = JSON.parse(readIf(TASKS)).tasks;
   eq("race: 12/12 tasks on disk", onDisk.length, 12);
   eq("race: 12/12 unique ids", new Set(onDisk.map((t) => t.id)).size, 12);
-  eq("race: no tmp orphans left", readdirSync(stateFile(root, ".")).filter((e) => e.includes(".tmp-")).length, 0);
+  eq("race: no lock/claim/stale/steal debris left", readdirSync(stateFile(root, ".")).filter((e) => e.includes(".tmp-") || e.includes(".lock") || e.includes(".steal")).length, 0);
   rmSync(root, { recursive: true, force: true });
 }
 
