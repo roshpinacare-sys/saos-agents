@@ -72,7 +72,14 @@ function atomicWrite(file, content) {
     if (e.code === "EEXIST") throw new Error(`TMP-EXISTS: ${path.basename(tmp)} already exists (symlink-or-debris) — refused by name, never bypassed; debris older than 60s is swept by sweepTmp`);
     throw e;
   }
-  try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
+  try {
+    try { writeSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
+    /* R263 · TEST-ONLY SEAM (inert by default): a deterministic fault-injection
+     * window for the contract's lock-hijack vector — yields BEFORE the ownership
+     * check so the external hijacker can swap the lock mid-critical-section.
+     * No effect unless SAOS_TEST_PERSIST_DELAY_MS is set by the test. */
+    const injectDelay = Number(process.env.SAOS_TEST_PERSIST_DELAY_MS ?? 0);
+    if (injectDelay > 0) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, injectDelay); } catch { /* no blocking */ } }
   /* R262c · final ownership check (the airtight net): the rename crosses only if the
    * lock name still points at MY claim's inode. Two writers can never BOTH pass —
    * the name has one inode and each claim is its own unique inode — so any residual
@@ -82,7 +89,15 @@ function atomicWrite(file, content) {
     try { ino = statSync(`${file}.lock`).ino; } catch { /* lock vanished — refuse */ }
     if (ino !== ACTIVE_LOCK.ino) throw new Error(`LOCK-LOST-MIDWRITE: ${path.basename(file)} — the lock changed under us mid-write; refusing by name (re-run), never a silent loss`);
   }
-  renameSync(tmp, file);
+    renameSync(tmp, file);
+  } catch (e) {
+    /* R263 · failure hygiene: a refused writer (LOCK-LOST-MIDWRITE / write error)
+     * must not leave its tmp orphaned behind — the refusal is named and the
+     * sandbox stays clean (measured: refusals left tasks.json.tmp-<pid> orphans
+     * that flaked the debris vector). */
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw e;
+  }
   sweepTmp(file);
 }
 /* R259 · crash-orphan hygiene: SIGKILL between write and rename leaves `file.tmp-<pid>` behind
