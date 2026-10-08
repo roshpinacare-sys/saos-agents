@@ -221,6 +221,16 @@ const ok = (name, cond) => (cond ? pass++ : (fail++, console.error(`FAIL ${name}
   try { tg.createTask({ id: "SD", title: "s", deps: ["SD"] }); } catch (e) { caught = e.code; }
   eq("taskgraph: createTask refuses self-dep (kills M20)", caught, "SELF-DEP");
   eq("taskgraph: validate catches self-dep (kills M20b)", tg.validateGraph({ tasks: [{ id: "SD", title: "s", status: "todo", deps: ["SD"] }] }).errors.some((e) => e.includes("תלות-עצמית")), true);
+  /* R264 · id-canon — נמדד-חי: תאומי-NFC/NFD התקבלו כשתי-משימות-שונות (עקיפת-זיהוי-כפילויות),
+   * ו-id-מספרי-ממוזג-יד עבר-ולידציה-בשקט. הצורה-היא-חוק. */
+  eq("taskgraph: createTask canonicalizes id to NFC (R264)", tg.createTask({ id: "cafe\u0301", title: "twin" }).id, "caf\u00e9");
+  eq("taskgraph: NFC/NFD twins collapse into one duplicate (R264)", tg.validateGraph({ tasks: [tg.createTask({ id: "caf\u00e9", title: "1" }), tg.createTask({ id: "cafe\u0301", title: "2" })] }).errors.some((e) => e.includes("כפילות-id")), true);
+  caught = null;
+  try { tg.createTask({ id: "caf\u00e9", title: "s", deps: ["cafe\u0301"] }); } catch (e) { caught = e.code; }
+  eq("taskgraph: dep canon surfaces NFD self-reference as SELF-DEP (R264)", caught, "SELF-DEP");
+  eq("taskgraph: validate names non-string id (R264)", tg.validateGraph({ tasks: [{ id: 123, title: "num", status: "todo", priority: 0, deps: [] }] }).errors.some((e) => e.includes("id-פגום")), true);
+  eq("taskgraph: validate names non-NFC id (R264)", tg.validateGraph({ tasks: [{ id: "cafe\u0301", title: "nfd", status: "todo", priority: 0, deps: [] }] }).errors.some((e) => e.includes("id-אינו-מנורמל-NFC")), true);
+  eq("taskgraph: validate names empty id (R264)", tg.validateGraph({ tasks: [{ id: "", title: "void", status: "todo", priority: 0, deps: [] }] }).errors.some((e) => e.includes("id-פגום")), true);
   const gsh = G();
   tg.setStatus(gsh, "A", "doing"); tg.setStatus(gsh, "A", "review");
   gsh.tasks[0].commit = sha;
