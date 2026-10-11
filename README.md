@@ -4,6 +4,25 @@
 > an operator decision queue that cannot die silently, and append-only worklog
 > telemetry that treats shrinkage as an alarm.
 
+**ROLE (declared 2026-10-11, task 10-c un-silence sweep):** the **agent
+registry & orchestration-core source of truth**. The fleet runs
+byte-identical vendored copies inside `steem` mini-services; THIS repo is the
+canonical, tested origin (deterministic offline selftest, mutation-tested)
+and the distribution point (GitHub Release v0.1.0; npm publish is
+owner-blocked — fine-grained PAT cannot publish, decision recorded in
+PUBLISH.md). Every fleet organ that vendored a copy should declare its
+lineage against this registry.
+
+**Why it was silenced:** zero imports org-wide (the fleet vendors copies
+instead of installing), npm publish owner-blocked ×3 (E403), and no
+workflows — not dead code, but a library without a reader. Its minimal duty
+now exists: the selftest gate below runs on public free minutes (read-only,
+zero secrets).
+
+**Revival path:** npm distribution needs one owner decision (publish-capable
+token or a GitHub-Packages rail); until then the Release asset is the
+distribution and this repo's duty is the registry + green selftest.
+
 **Status:** battle-tested daily inside a live multi-agent fleet · **License:** MIT · **Runtime:** Bun or Node ≥ 18 · **Dependencies:** zero
 
 ---

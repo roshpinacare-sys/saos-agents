@@ -1,0 +1,42 @@
+# SELFTEST-GATE — saos-agents' standing duty (task 10-c, un-silence sweep)
+#
+# ROLE: this repo is the agent registry & orchestration-core source of truth.
+# The deterministic offline selftest is the registry's green line: the core
+# cannot drift silently. Read-only, zero secrets, zero network — vectors run
+# offline by design (the file enforces lineage floors on itself).
+#
+# No billing caveat needed: this repo is PUBLIC = free Actions minutes. Still
+# dispatch-only on purpose (no cron) — the gate exists so registry changes
+# are provably green, and fleet-heal can fire it after any vendored-copy
+# sync. Runs anywhere too:  bun test/selftest.mjs
+
+name: selftest-gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-gate
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Deterministic offline selftest (fail = named, fail-honest)
+        run: bun test/selftest.mjs
+
+      - name: Analytics selftest
+        run: bun cli/worklog-analytics.mjs --selftest
