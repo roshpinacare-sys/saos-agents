@@ -1,0 +1,31 @@
+name: gitleaks
+# ═══════════════════════════════════════════════════════════════════════════
+# FLEET LAW (T-53 contract, zai-code-3 2026-10-11): every critical repo scans
+# its HEAD on push — secret-scanning died silently on the private rail
+# (billing wall) for 5+ weeks; the external artery (Sandbox artery-fleet, public
+# minutes) now re-scans every 2h, but in-repo scanning stays the first line.
+# Fail-closed: a finding reds the run.
+# ═══════════════════════════════════════════════════════════════════════════
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
