@@ -1,0 +1,22 @@
+{
+  "protocol": "FLEET-COORDINATION/1",
+  "claims": [
+    {
+      "task_id": "W9-coordination-seed",
+      "agent": "zai-code",
+      "claimed_at": "2026-10-11T12:30:00Z",
+      "lease_until": "2026-10-12T12:30:00Z",
+      "scope_paths": ["fleet-coordination/*"],
+      "status": "active",
+      "evidence": "commit of this file + PROTOCOL.md"
+    }
+  ],
+  "open_workstreams": {
+    "W1-security-phase0": "rotation of 4 vault incidents + purge + PAT hygiene — BLOCKS W3/W4/W7",
+    "W2-ci-gates": "push triggers, corrupt 'ain]' fixes, status-API bot, branch protection",
+    "W3-grid-calibration": "re-arm under STASIS staged lanes with spend caps + kill-switch proof",
+    "W4-capital-allocation": "power-up/delegation matrix (custody-verified targets only)",
+    "W5-content-quality": "posting density + quality bar + cross-network coordination",
+    "W6-opsec-hardening": "public/private surface separation, redaction of strategy+keys"
+  }
+}
