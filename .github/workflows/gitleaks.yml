@@ -7,6 +7,8 @@ name: gitleaks
 # Fail-closed: a finding reds the run.
 # ═══════════════════════════════════════════════════════════════════════════
 on:
+  schedule:
+    - cron: "17 5 * * *"  # דופק-יומי-עצמאי (גל-116 W121)
   push:
   pull_request:
   workflow_dispatch:
